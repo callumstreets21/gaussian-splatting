@@ -417,19 +417,37 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % 50 == 0:
                     profile_memory_usage(f"BEFORE_OPTIMIZER_STEP_iter_{iteration}", gaussians)
                 
+                # Handle exposure optimizer (separate from mixed precision)
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 
                 # Mixed precision optimizer step
                 if scaler is not None:
-                    if use_sparse_adam:
-                        visible = radii > 0
-                        scaler.step(gaussians.optimizer)
-                        gaussians.optimizer.zero_grad(set_to_none = True)
-                    else:
-                        scaler.step(gaussians.optimizer)
-                        gaussians.optimizer.zero_grad(set_to_none = True)
-                    scaler.update()
+                    try:
+                        if use_sparse_adam:
+                            visible = radii > 0
+                            scaler.step(gaussians.optimizer)
+                            gaussians.optimizer.zero_grad(set_to_none = True)
+                        else:
+                            scaler.step(gaussians.optimizer)
+                            gaussians.optimizer.zero_grad(set_to_none = True)
+                        scaler.update()
+                    except AssertionError as e:
+                        if "No inf checks were recorded" in str(e):
+                            # Fallback to normal optimizer step if scaler fails
+                            print(f"Warning: GradScaler assertion failed at iteration {iteration}")
+                            print("This usually means mixed precision is not compatible with the current setup.")
+                            print("Disabling mixed precision for the rest of training...")
+                            scaler = None  # Disable mixed precision for remaining iterations
+                            if use_sparse_adam:
+                                visible = radii > 0
+                                gaussians.optimizer.step(visible, radii.shape[0])
+                                gaussians.optimizer.zero_grad(set_to_none = True)
+                            else:
+                                gaussians.optimizer.step()
+                                gaussians.optimizer.zero_grad(set_to_none = True)
+                        else:
+                            raise
                 else:
                     if use_sparse_adam:
                         visible = radii > 0
@@ -578,7 +596,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     # Memory optimization arguments
-    parser.add_argument('--max_gaussians', type=int, default=2000000, 
+    parser.add_argument('--max_gaussians', type=int, default=8000000, 
                        help='Maximum number of Gaussians to prevent runaway growth')
     parser.add_argument('--aggressive_pruning', action='store_true', 
                        help='Enable more aggressive pruning to reduce memory')
@@ -602,7 +620,7 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     # Print memory optimization settings
     print(f"\nMemory Optimization Settings:")
-    print(f"  Max Gaussians: {getattr(args, 'max_gaussians', 2000000):,}")
+    print(f"  Max Gaussians: {getattr(args, 'max_gaussians', 8000000):,}")
     print(f"  Aggressive Pruning: {getattr(args, 'aggressive_pruning', False)}")
     print(f"  Mixed Precision: {getattr(args, 'mixed_precision', False)}")
     print(f"  Reduced SH Degree: {getattr(args, 'reduce_sh_degree', 'None')}")
