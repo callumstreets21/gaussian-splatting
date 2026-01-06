@@ -65,7 +65,12 @@ except:
 
 print("sparse adam available: " + str(SPARSE_ADAM_AVAILABLE))
 
+# Global switch to enable/disable memory profiling (can be toggled via CLI)
+MEM_PROFILING_ENABLED = True
+
 def print_mem_stats(prefix=""):
+    if not MEM_PROFILING_ENABLED:
+        return
     torch.cuda.synchronize()
     print(f"\n[MEM] {prefix} gpu_alloc={torch.cuda.memory_allocated()/1e9:.3f}G "
           f"gpu_reserved={torch.cuda.memory_reserved()/1e9:.3f}G")
@@ -76,6 +81,8 @@ def print_mem_stats(prefix=""):
 
 def print_tensor_stats(gaussians):
     """Print detailed tensor statistics for Gaussian model"""
+    if not MEM_PROFILING_ENABLED:
+        return
     print("\n[TENSOR STATS] Gaussian Model Tensors:")
     for name, tensor in [
         ("xyz", gaussians._xyz),
@@ -106,6 +113,8 @@ def print_tensor_stats(gaussians):
 
 def print_detailed_mem_stats(prefix="", gaussians=None):
     """Enhanced memory statistics with detailed breakdown"""
+    if not MEM_PROFILING_ENABLED:
+        return
     torch.cuda.synchronize()
     allocated = torch.cuda.memory_allocated() / 1e9
     reserved = torch.cuda.memory_reserved() / 1e9
@@ -144,6 +153,8 @@ def print_detailed_mem_stats(prefix="", gaussians=None):
 
 def profile_memory_usage(stage, gaussians=None, reset_max=False):
     """Profile memory usage at specific stages"""
+    if not MEM_PROFILING_ENABLED:
+        return
     if reset_max:
         torch.cuda.reset_max_memory_allocated()
     
@@ -166,6 +177,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
+    # Apply CLI-controlled memory profiling switch
+    global MEM_PROFILING_ENABLED
+    if args is not None:
+        MEM_PROFILING_ENABLED = not getattr(args, 'disable_mem_profile', False)
     
     # Apply SH degree reduction if specified
     effective_sh_degree = dataset.sh_degree
@@ -397,12 +412,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                     
                     # Memory profiling after densification
-                    n_points_after = gaussians.get_xyz.shape[0]
-                    points_added = n_points_after - n_points_before
-                    print(f"\n[DENSIFICATION] iter {iteration}: {n_points_before:,} -> {n_points_after:,} points (net change: {points_added:+,})")
-                    profile_memory_usage(f"AFTER_DENSIFICATION_iter_{iteration}", gaussians)
-                    print_tensor_stats(gaussians)
-                    
+                    if MEM_PROFILING_ENABLED:
+                        n_points_after = gaussians.get_xyz.shape[0]
+                        points_added = n_points_after - n_points_before
+                        print(f"\n[DENSIFICATION] iter {iteration}: {n_points_before:,} -> {n_points_after:,} points (net change: {points_added:+,})")
+                        profile_memory_usage(f"AFTER_DENSIFICATION_iter_{iteration}", gaussians)
+                        print_tensor_stats(gaussians)
+                        
                     # Force garbage collection after densification
                     torch.cuda.empty_cache()
                 
@@ -465,7 +481,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 prune_freq = getattr(args, 'prune_frequency', 100)
                 if iteration % prune_freq == 0 and iteration > opt.densify_from_iter:
                     n_points = gaussians.get_xyz.shape[0]
-                    max_gaussians = getattr(args, 'max_gaussians', 2000000)
+                    max_gaussians = getattr(args, 'max_gaussians', 8000000)
                     if n_points > max_gaussians * 0.9:  # Close to limit
                         print(f"\n[PERIODIC PRUNING] iter {iteration}: {n_points:,} points, pruning low opacity Gaussians")
                         prune_mask = (gaussians.get_opacity < 0.01).squeeze()
@@ -475,7 +491,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # In the training loop (after optimizer step, after densify)
 
             # Enhanced memory reporting every 100 iterations
-            if iteration % 100 == 0:
+            if iteration % 100 == 0 and MEM_PROFILING_ENABLED:
                 print(f"\n{'='*60}")
                 print(f"ITERATION {iteration} MEMORY REPORT")
                 print(f"{'='*60}")
@@ -606,6 +622,8 @@ if __name__ == "__main__":
                        help='Reduce spherical harmonics degree to save memory')
     parser.add_argument('--prune_frequency', type=int, default=100,
                        help='Frequency of aggressive pruning (iterations)')
+    parser.add_argument('--disable_mem_profile', action='store_true',
+                       help='Disable memory profiling and related prints')
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -625,6 +643,7 @@ if __name__ == "__main__":
     print(f"  Mixed Precision: {getattr(args, 'mixed_precision', False)}")
     print(f"  Reduced SH Degree: {getattr(args, 'reduce_sh_degree', 'None')}")
     print(f"  Prune Frequency: {getattr(args, 'prune_frequency', 100)}")
+    print(f"  Memory Profiling Enabled: {not getattr(args, 'disable_mem_profile', False)}")
     
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args)
 
